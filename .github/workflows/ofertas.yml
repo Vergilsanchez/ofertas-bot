@@ -2,12 +2,22 @@ name: Buscar ofertas
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC = 9:00 en Curitiba
-  workflow_dispatch:        # permite ejecutarlo a mano con un boton
+    # Cada hora al minuto 17 (+ espera al azar de hasta 10 min en el bot).
+    # Descansa de 2:00 a 7:00 de Curitiba (= 5:00 a 10:00 UTC).
+    - cron: "17 0-4,10-23 * * *"
+  workflow_dispatch:          # permite ejecutarlo a mano con un boton
+
+permissions:
+  contents: write             # para guardar la memoria (estado.json)
+
+concurrency:
+  group: ofertas
+  cancel-in-progress: false
 
 jobs:
   ofertas:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,3 +29,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+      - name: Guardar memoria
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add estado.json
+          git diff --cached --quiet || (git commit -m "actualizar estado" && git push)
