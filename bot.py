@@ -2,23 +2,31 @@
 Bot de ofertas de Mercado Livre -> Telegram
 
 Modos:
-  python bot.py ofertas   -> busca ofertas y te las manda a ti por privado
+  python bot.py ofertas   -> busca ofertas NUEVAS y te las manda por privado
   python bot.py publicar  -> publica en tu canal las ofertas a las que
-                             respondiste con tu enlace meli.la
+                             respondiste con tu enlace meli.la (con pausa
+                             entre una y otra)
 """
 import html
 import json
 import os
+import random
 import re
 import sys
+import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
 
 # ---------- AJUSTES (puedes cambiarlos) ----------
-DESCUENTO_MINIMO = 30   # solo ofertas con este % de rebaja o mas
-MAX_OFERTAS = 10        # cuantas ofertas te manda cada dia
+DESCUENTO_MINIMO = 30            # solo ofertas con este % de rebaja o mas
+MAX_OFERTAS = 5                  # maximo de ofertas NUEVAS por busqueda
+PAUSA_ENTRE_PUBLICACIONES = 120  # segundos entre una publicacion y otra
+RECORDAR = 1000                  # cuantas ofertas recuerda para no repetir
+JITTER_MAX = 600                 # espera al azar (0 a 10 min) antes de buscar
+ESPERAS_BLOQUEO = [60, 120, 240, 360]  # minutos de pausa si ML falla/bloquea
+ARCHIVO_ESTADO = "estado.json"
 URL_OFERTAS = "https://www.mercadolivre.com.br/ofertas"
 TEXTO_COMPRA = "🛒 Compre aqui:"  # frase antes de tu enlace en el canal
 # -------------------------------------------------
@@ -27,13 +35,25 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 OWNER = int(os.environ["OWNER_CHAT_ID"])
 CANAL = os.environ["CHANNEL_ID"]
 API = f"https://api.telegram.org/bot{TOKEN}"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "pt-BR,pt;q=0.9",
-}
+AGENTES = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
+
+
+def cabeceras():
+    return {
+        "User-Agent": random.choice(AGENTES),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
 
 # ---------- Telegram ----------
@@ -48,6 +68,26 @@ def tg(metodo, **params):
 def brl(v):
     s = f"{v:,.2f}"
     return "R$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+# ---------- Memoria (para no repetir ofertas) ----------
+def cargar_estado():
+    try:
+        with open(ARCHIVO_ESTADO, encoding="utf-8") as f:
+            e = json.load(f)
+    except (OSError, ValueError):
+        e = {}
+    e.setdefault("vistos", [])
+    e.setdefault("fallo", False)
+    e.setdefault("fallos", 0)
+    e.setdefault("pausa_hasta", 0)
+    return e
+
+
+def guardar_estado(e):
+    e["vistos"] = e["vistos"][-RECORDAR:]
+    with open(ARCHIVO_ESTADO, "w", encoding="utf-8") as f:
+        json.dump(e, f, ensure_ascii=False, indent=1)
 
 
 # ---------- Leer ofertas de Mercado Livre ----------
@@ -128,7 +168,7 @@ def parsear(card):
 
 
 def obtener_ofertas():
-    r = requests.get(URL_OFERTAS, headers=HEADERS, timeout=30)
+    r = requests.get(URL_OFERTAS, headers=cabeceras(), timeout=30)
     if r.status_code != 200:
         raise RuntimeError(f"Mercado Livre respondio con codigo {r.status_code}")
     soup = BeautifulSoup(r.text, "html.parser")
@@ -165,83 +205,105 @@ def texto_canal(original, link):
     return f"{base}\n\n{TEXTO_COMPRA} {link}"
 
 
-# ---------- Modo 1: buscar y mandarte las ofertas ----------
-def modo_ofertas():
+# ---------- Modo 1: buscar ofertas nuevas y mandartelas ----------
+def buscar_y_enviar(estado):
+    if time.time() < estado["pausa_hasta"]:
+        return  # en pausa por un fallo o bloqueo anterior
+    time.sleep(random.uniform(0, JITTER_MAX))  # evita horarios exactos
     try:
         ofertas = obtener_ofertas()
+        if not ofertas:
+            raise RuntimeError(
+                "no encontre ninguna oferta (la pagina pudo cambiar o "
+                "bloquear la consulta)")
     except Exception as e:
-        tg("sendMessage", chat_id=OWNER,
-           text=f"⚠️ No pude leer Mercado Livre: {e}")
+        estado["fallos"] += 1
+        espera = ESPERAS_BLOQUEO[min(estado["fallos"], len(ESPERAS_BLOQUEO)) - 1]
+        estado["pausa_hasta"] = time.time() + espera * 60
+        if not estado["fallo"]:  # avisa solo una vez
+            tg("sendMessage", chat_id=OWNER,
+               text=f"⚠️ No pude leer Mercado Livre: {e}\n"
+                    f"Pauso las busquedas {espera // 60} h y reintento solo. "
+                    "Te aviso solo esta vez.")
+        estado["fallo"] = True
         return
-    if not ofertas:
+    if estado["fallo"]:
         tg("sendMessage", chat_id=OWNER,
-           text="⚠️ No pude leer ninguna oferta. Mercado Livre pudo cambiar su "
-                "pagina o bloquear la consulta. Avisa para ajustar el bot.")
-        return
+           text="✅ Ya puedo leer Mercado Livre otra vez.")
+    estado["fallo"] = False
+    estado["fallos"] = 0
+    estado["pausa_hasta"] = 0
 
-    buenas = sorted(
-        (o for o in ofertas if o["desc"] >= DESCUENTO_MINIMO),
+    vistos = set(estado["vistos"])
+    nuevas = sorted(
+        (o for o in ofertas
+         if o["desc"] >= DESCUENTO_MINIMO and o["url"] not in vistos),
         key=lambda o: -o["desc"],
     )[:MAX_OFERTAS]
-    if not buenas:
-        tg("sendMessage", chat_id=OWNER,
-           text=f"Hoy no hay ofertas con {DESCUENTO_MINIMO}% o mas "
-                f"(lei {len(ofertas)} productos).")
-        return
 
-    tg("sendMessage", chat_id=OWNER,
-       text=f"☀️ {len(buenas)} ofertas de hoy. Genera tu enlace meli.la de las "
-            "que quieras y respondelo al mensaje de cada una.")
-    for o in buenas:
+    for o in nuevas:
         txt = texto_privado(o)
         ok = False
         if o["img"]:
             ok = tg("sendPhoto", chat_id=OWNER, photo=o["img"],
                     caption=txt).get("ok")
         if not ok:
-            tg("sendMessage", chat_id=OWNER, text=txt,
-               disable_web_page_preview="true")
+            ok = tg("sendMessage", chat_id=OWNER, text=txt,
+                    disable_web_page_preview="true").get("ok")
+        if ok:
+            estado["vistos"].append(o["url"])
 
 
-# ---------- Modo 2: publicar lo que respondiste ----------
+def modo_ofertas():
+    estado = cargar_estado()
+    try:
+        buscar_y_enviar(estado)
+    finally:
+        guardar_estado(estado)
+
+
+# ---------- Modo 2: publicar lo que respondiste, con pausas ----------
+def publicar_una(m, link):
+    orig = m["reply_to_message"]
+    original = orig.get("caption") or orig.get("text") or ""
+    final = texto_canal(original, link)
+    if orig.get("photo"):
+        r = tg("sendPhoto", chat_id=CANAL,
+               photo=orig["photo"][-1]["file_id"], caption=final,
+               parse_mode="HTML")
+    else:
+        r = tg("sendMessage", chat_id=CANAL, text=final,
+               parse_mode="HTML", disable_web_page_preview="true")
+    if r.get("ok"):
+        tg("sendMessage", chat_id=OWNER, text="✅ Publicado en tu canal.")
+    else:
+        tg("sendMessage", chat_id=OWNER,
+           text=f"❌ No pude publicar: {r.get('description')}")
+
+
 def modo_publicar():
-    res = tg("getUpdates", timeout=0,
-             allowed_updates=json.dumps(["message"]))
-    updates = res.get("result", [])
-    if not updates:
-        return
-
-    for u in updates:
-        m = u.get("message")
-        if not m or m["chat"]["id"] != OWNER:
-            continue
-        link = re.search(r"https?://meli\.la/\w+", m.get("text", ""))
-        if not link:
-            continue
-        orig = m.get("reply_to_message")
-        if not orig:
-            tg("sendMessage", chat_id=OWNER,
-               text="Para publicar, RESPONDE (reply) al mensaje de la oferta "
-                    "con tu enlace meli.la.")
-            continue
-
-        original = orig.get("caption") or orig.get("text") or ""
-        final = texto_canal(original, link.group(0))
-        if orig.get("photo"):
-            r = tg("sendPhoto", chat_id=CANAL,
-                   photo=orig["photo"][-1]["file_id"], caption=final,
-                   parse_mode="HTML")
-        else:
-            r = tg("sendMessage", chat_id=CANAL, text=final,
-                   parse_mode="HTML", disable_web_page_preview="true")
-        if r.get("ok"):
-            tg("sendMessage", chat_id=OWNER, text="✅ Publicado en tu canal.")
-        else:
-            tg("sendMessage", chat_id=OWNER,
-               text=f"❌ No pude publicar: {r.get('description')}")
-
-    # marcar como leidos para no repetirlos
-    tg("getUpdates", offset=updates[-1]["update_id"] + 1, limit=1, timeout=0)
+    hubo_publicacion = False
+    while True:  # sigue hasta vaciar la cola (incluye respuestas nuevas)
+        res = tg("getUpdates", timeout=0,
+                 allowed_updates=json.dumps(["message"]))
+        updates = res.get("result", [])
+        if not updates:
+            return
+        for u in updates:
+            m = u.get("message")
+            if m and m["chat"]["id"] == OWNER:
+                link = re.search(r"https?://meli\.la/\w+", m.get("text", ""))
+                if link and not m.get("reply_to_message"):
+                    tg("sendMessage", chat_id=OWNER,
+                       text="Para publicar, RESPONDE (reply) al mensaje de "
+                            "la oferta con tu enlace meli.la.")
+                elif link:
+                    if hubo_publicacion:
+                        time.sleep(PAUSA_ENTRE_PUBLICACIONES)
+                    publicar_una(m, link.group(0))
+                    hubo_publicacion = True
+            # marcar como leido (ya procesado) para no repetirlo
+            tg("getUpdates", offset=u["update_id"] + 1, limit=1, timeout=0)
 
 
 if __name__ == "__main__":
