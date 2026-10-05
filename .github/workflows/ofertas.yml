@@ -1,0 +1,21 @@
+name: Buscar ofertas
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC = 9:00 en Curitiba
+  workflow_dispatch:        # permite ejecutarlo a mano con un boton
+
+jobs:
+  ofertas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests beautifulsoup4
+      - run: python bot.py ofertas
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
