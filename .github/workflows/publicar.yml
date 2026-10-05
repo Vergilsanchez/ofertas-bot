@@ -2,12 +2,18 @@ name: Publicar ofertas
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # revisa cada 15 minutos
+    # Cada 30 minutos. Descansa de 2:00 a 7:00 de Curitiba (= 5:00 a 10:00 UTC).
+    - cron: "0,30 0-4,10-23 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: publicar             # evita que dos ejecuciones publiquen a la vez
+  cancel-in-progress: false
 
 jobs:
   publicar:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
