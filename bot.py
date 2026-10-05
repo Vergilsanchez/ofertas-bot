@@ -6,6 +6,7 @@ Modos:
   python bot.py publicar  -> publica en tu canal las ofertas a las que
                              respondiste con tu enlace meli.la
 """
+import html
 import json
 import os
 import re
@@ -157,7 +158,10 @@ def texto_privado(o):
 
 def texto_canal(original, link):
     lineas = [l for l in original.splitlines() if not l.startswith(("🔗", "↩"))]
-    base = "\n".join(lineas).strip()
+    base = html.escape("\n".join(lineas).strip())
+    # precio anterior tachado y precio actual en negrita
+    base = re.sub(r"De (R\$ [\d.,]+) por (R\$ [\d.,]+)",
+                  r"De <s>\1</s> por <b>\2</b>", base)
     return f"{base}\n\n{TEXTO_COMPRA} {link}"
 
 
@@ -225,10 +229,11 @@ def modo_publicar():
         final = texto_canal(original, link.group(0))
         if orig.get("photo"):
             r = tg("sendPhoto", chat_id=CANAL,
-                   photo=orig["photo"][-1]["file_id"], caption=final)
+                   photo=orig["photo"][-1]["file_id"], caption=final,
+                   parse_mode="HTML")
         else:
             r = tg("sendMessage", chat_id=CANAL, text=final,
-                   disable_web_page_preview="true")
+                   parse_mode="HTML", disable_web_page_preview="true")
         if r.get("ok"):
             tg("sendMessage", chat_id=OWNER, text="✅ Publicado en tu canal.")
         else:
