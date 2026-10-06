@@ -29,6 +29,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          FORZAR: ${{ github.event_name == 'workflow_dispatch' }}
       - name: Guardar memoria
         run: |
           git config user.name "bot"
