@@ -34,6 +34,7 @@ TEXTO_COMPRA = "🛒 Compre aqui:"  # frase antes de tu enlace en el canal
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 OWNER = int(os.environ["OWNER_CHAT_ID"])
 CANAL = os.environ["CHANNEL_ID"]
+FORZAR = os.environ.get("FORZAR") == "true"  # ejecucion manual: sin pausas
 API = f"https://api.telegram.org/bot{TOKEN}"
 AGENTES = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -110,14 +111,19 @@ def valor(frac):
 
 
 def parsear(card):
+    enlaces = card.select("a[href]")
     enlace = card.select_one(
         "a.poly-component__title, a.promotion-item__link-container"
-    ) or card.select_one("a[href]")
+    ) or (max(enlaces, key=lambda a: len(a.get_text(strip=True)))
+          if enlaces else None)
     if not enlace or not enlace.get("href"):
         return None
 
     t_el = card.select_one(".poly-component__title, .promotion-item__title")
     titulo = (t_el or enlace).get_text(" ", strip=True)
+    if not titulo:
+        img_t = card.select_one("img[alt]")
+        titulo = img_t.get("alt", "").strip() if img_t else ""
     if not titulo:
         return None
 
@@ -167,20 +173,57 @@ def parsear(card):
             "desc": desc, "url": url, "img": img}
 
 
+def tarjetas_genericas(soup):
+    """Plan B: encuentra productos por sus descuentos, sin depender del
+    nombre exacto de las clases de la tarjeta."""
+    vistas, tarjetas = set(), []
+    for d in soup.select(".andes-money-amount__discount, .poly-price__disc_label"):
+        nodo = d
+        for _ in range(8):
+            nodo = nodo.parent
+            if nodo is None:
+                break
+            if nodo.select_one("a[href]") and nodo.select(
+                    ".andes-money-amount__fraction"):
+                if id(nodo) not in vistas:
+                    vistas.add(id(nodo))
+                    tarjetas.append(nodo)
+                break
+    return tarjetas
+
+
 def obtener_ofertas():
     r = requests.get(URL_OFERTAS, headers=cabeceras(), timeout=30)
     if r.status_code != 200:
-        raise RuntimeError(f"Mercado Livre respondio con codigo {r.status_code}")
+        raise RuntimeError(
+            f"Mercado Livre respondio con codigo {r.status_code} ({r.url})")
     soup = BeautifulSoup(r.text, "html.parser")
-    cards = soup.select("div.poly-card") or soup.select(
-        "li.promotion-item, div.promotion-item"
-    )
+    candidatos = [
+        soup.select("div.poly-card"),
+        soup.select("li.promotion-item, div.promotion-item"),
+        tarjetas_genericas(soup),
+    ]
     vistos, ofertas = set(), []
-    for c in cards:
-        o = parsear(c)
-        if o and o["url"] not in vistos:
-            vistos.add(o["url"])
-            ofertas.append(o)
+    for cards in candidatos:
+        for c in cards:
+            o = parsear(c)
+            if o and o["url"] not in vistos:
+                vistos.add(o["url"])
+                ofertas.append(o)
+        if ofertas:
+            break
+    if not ofertas:
+        titulo = soup.title.get_text(strip=True) if soup.title else "?"
+        bajo = r.text.lower()
+        pista = " | posible captcha/bloqueo" if (
+            "captcha" in bajo or "robot" in bajo or "verifica" in bajo) else ""
+        raise RuntimeError(
+            f"pagina sin ofertas legibles | titulo: {titulo[:80]} | "
+            f"url: {r.url[:100]} | bytes: {len(r.text)} | "
+            f"poly-card: {len(candidatos[0])} | "
+            f"precios: {len(soup.select('.andes-money-amount__fraction'))} | "
+            f"descuentos: {len(soup.select('.andes-money-amount__discount'))}"
+            f"{pista}")
     return ofertas
 
 
@@ -207,9 +250,10 @@ def texto_canal(original, link):
 
 # ---------- Modo 1: buscar ofertas nuevas y mandartelas ----------
 def buscar_y_enviar(estado):
-    if time.time() < estado["pausa_hasta"]:
+    if not FORZAR and time.time() < estado["pausa_hasta"]:
         return  # en pausa por un fallo o bloqueo anterior
-    time.sleep(random.uniform(0, JITTER_MAX))  # evita horarios exactos
+    if not FORZAR:
+        time.sleep(random.uniform(0, JITTER_MAX))  # evita horarios exactos
     try:
         ofertas = obtener_ofertas()
         if not ofertas:
@@ -220,7 +264,7 @@ def buscar_y_enviar(estado):
         estado["fallos"] += 1
         espera = ESPERAS_BLOQUEO[min(estado["fallos"], len(ESPERAS_BLOQUEO)) - 1]
         estado["pausa_hasta"] = time.time() + espera * 60
-        if not estado["fallo"]:  # avisa solo una vez
+        if FORZAR or not estado["fallo"]:  # avisa solo una vez
             tg("sendMessage", chat_id=OWNER,
                text=f"⚠️ No pude leer Mercado Livre: {e}\n"
                     f"Pauso las busquedas {espera // 60} h y reintento solo. "
