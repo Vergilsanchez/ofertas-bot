@@ -20,7 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ---------- AJUSTES (puedes cambiarlos) ----------
-DESCUENTO_MINIMO = 30            # solo ofertas con este % de rebaja o mas
+DESCUENTO_MINIMO = 20            # solo ofertas con este % de rebaja o mas
 MAX_OFERTAS = 5                  # maximo de ofertas NUEVAS por busqueda
 PAUSA_ENTRE_PUBLICACIONES = 120  # segundos entre una publicacion y otra
 RECORDAR = 1000                  # cuantas ofertas recuerda para no repetir
